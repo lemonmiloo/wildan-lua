@@ -1,5 +1,11 @@
+AddHook("OnTextPacket", "ChatLogger", function(flag, packet)
+    if packet:find("action|input") then
+        local teks = packet:match("|text|(.*)")
 
--- Wildan Lua | GENTA HAX
+        if teks and teks ~= "" then
+            logToConsole("`9[CHAT] `w" .. teks)
+        end
+    end
 
-logToConsole("`6[Wildan Lua] `2Script dari GitHub berhasil dimuat!")
-logToConsole("`6[Wildan Lua] `wPengecekan pemuatan script selesai.")
+    return false
+end)
