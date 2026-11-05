@@ -19,13 +19,13 @@ local Config = {
     putAction   = "tile",
     breakAction = "tile",
 
-    KIND_PUT   = nil,
-    KIND_BREAK = nil,
+    KIND_PUT    = nil,
+    KIND_BREAK  = nil,
     SPLICE_SEED = nil,
 
-    putCD   = 0.12,
-    breakCD = 0.12,
-    scanInterval  = 1.5,
+    putCD          = 0.12,
+    breakCD        = 0.12,
+    scanInterval   = 1.5,
     confirmTimeout = 3.0,
 
     breakMode = "mature",
@@ -84,9 +84,9 @@ local function getTile(layer, x, y)
 end
 
 local function setTile(layer, x, y, id, flip)
-    World.tiles[layer]        = World.tiles[layer] or {}
-    World.tiles[layer][x]     = World.tiles[layer][x] or {}
-    World.tiles[layer][x][y]  = { id = id, flip = flip == true, seenAt = os.clock() }
+    World.tiles[layer]       = World.tiles[layer] or {}
+    World.tiles[layer][x]    = World.tiles[layer][x] or {}
+    World.tiles[layer][x][y] = { id = id, flip = flip == true, seenAt = os.clock() }
     World.pending[keyOf(layer, x, y)] = nil
 end
 
@@ -200,6 +200,7 @@ local function farmTick()
         breakBlock(t.x, t.y)
         task.wait(Config.breakCD)
     end
+
     if not Config.enabled then return end
     local empty = scanGrid()
     for _, t in ipairs(empty) do
@@ -252,25 +253,30 @@ local function learn(duration)
     log.info(("learner armed for %ds — place/break blocks manually now"):format(duration))
     local active = true
     local tiles, items = {}, {}
+
     Net.tileChanged.listen(function(p)
         if not active or p.w ~= worldTag() then return end
         tiles[p.id] = (tiles[p.id] or 0) + 1
     end)
+
     Net.itemsGiven.listen(function(gs)
         if not active then return end
         for _, it in ipairs(gs or {}) do
             items[it[1]] = (items[it[1]] or 0) + (it[2] or 0)
         end
     end)
+
     task.delay(duration, function()
         active = false
         log.info("learner report:")
+
         local tids = {}
         for id in tiles do tids[#tids + 1] = id end
         table.sort(tids)
         for _, id in tids do
             print(("  tile id=%d  seen=%d"):format(id, tiles[id]))
         end
+
         local iids = {}
         for id in items do iids[#iids + 1] = id end
         table.sort(iids)
@@ -297,9 +303,12 @@ local function calibrate()
                 end
             end
         end
+
         log.info(("calibration sent %d probes, waiting %ds for confirms")
             :format(sent, math.floor(Config.confirmTimeout + 1)))
+
         task.wait(Config.confirmTimeout + 1)
+
         local _, _, known = scanGrid()
         local total = (Config.maxX - Config.minX + 1) * (Config.maxY - Config.minY + 1)
         log.info(("calibration done — %d/%d tiles confirmed"):format(known, total))
@@ -328,5 +337,6 @@ if Config.autoStart then
 end
 
 log.info("loaded — _G.GrowbloxFarm ready")
+log.info("first run: learn() → set IDs → calibrate() → start()")
 
 return Farm
