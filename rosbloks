@@ -1,0 +1,814 @@
+--!nonstrict
+-- Growblox Farm — Control Panel GUI
+-- Run AFTER the farm script (must have _G.GrowbloxFarm defined).
+-- LocalScript in StarterPlayerScripts, or executor.
+
+local Players           = game:GetService("Players")
+local UserInputService  = game:GetService("UserInputService")
+local RunService        = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService       = game:GetService("HttpService")
+
+local Farm = _G.GrowbloxFarm
+if not Farm then
+    error("[gui] load the farm script first (_G.GrowbloxFarm missing)", 0)
+end
+local Config = Farm.Config
+local World  = Farm.World
+local Net    = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Net"))
+
+-- ═══════════════════════════════════════════════════════════════
+-- LOG SYSTEM
+-- ═══════════════════════════════════════════════════════════════
+
+local MAX_LOG = 200
+local LogEntries = {}
+local LogListeners = {}
+
+local function log(msg, color)
+    local entry = {
+        text  = os.date("%H:%M:%S") .. "  " .. tostring(msg),
+        color = color or Color3.fromRGB(210, 215, 230),
+    }
+    table.insert(LogEntries, 1, entry)
+    while #LogEntries > MAX_LOG do
+        table.remove(LogEntries)
+    end
+    for _, fn in ipairs(LogListeners) do
+        pcall(fn, entry)
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- PACKET SEND HOOKS (activity feed)
+-- ═══════════════════════════════════════════════════════════════
+
+local function hookSend(packet, tag, color)
+    if not packet or not packet.send then return end
+    local orig = packet.send
+    packet.send = function(payload)
+        if payload and payload.x ~= nil and payload.y ~= nil then
+            log(("%s → (%s,%s)"):format(tag, tostring(payload.x), tostring(payload.y)), color)
+        else
+            log(tag .. " → send", color)
+        end
+        return orig(payload)
+    end
+end
+
+hookSend(Net.tile,    "tile",    Color3.fromRGB(150, 200, 255))
+hookSend(Net.splice,  "splice",  Color3.fromRGB(180, 220, 150))
+hookSend(Net.harvest, "harvest", Color3.fromRGB(230, 200, 130))
+hookSend(Net.act,     "act",     Color3.fromRGB(200, 170, 240))
+
+-- ═══════════════════════════════════════════════════════════════
+-- CONFIG PERSISTENCE (executor only; no-op in Studio)
+-- ═══════════════════════════════════════════════════════════════
+
+local CONFIG_PATH = "growblox_farm_config.json"
+
+local function saveConfig()
+    if not writefile then
+        log("save skipped (no writefile)", Color3.fromRGB(200, 180, 120))
+        return false
+    end
+    local data = {}
+    for k, v in pairs(Config) do
+        if type(v) ~= "function" then
+            data[k] = v
+        end
+    end
+    local ok = pcall(function()
+        writefile(CONFIG_PATH, HttpService:JSONEncode(data))
+    end)
+    log(ok and "config saved" or "config save failed",
+        ok and Color3.fromRGB(160, 220, 160) or Color3.fromRGB(220, 120, 120))
+    return ok
+end
+
+local function loadConfig()
+    if not readfile or not isfile or not isfile(CONFIG_PATH) then return false end
+    local ok, decoded = pcall(function()
+        return HttpService:JSONDecode(readfile(CONFIG_PATH))
+    end)
+    if not ok or type(decoded) ~= "table" then return false end
+    for k, v in pairs(decoded) do
+        if Config[k] ~= nil and type(Config[k]) ~= "function" then
+            Config[k] = v
+        end
+    end
+    log("config loaded", Color3.fromRGB(160, 220, 160))
+    return true
+end
+
+loadConfig()
+
+-- ═══════════════════════════════════════════════════════════════
+-- PALETTE
+-- ═══════════════════════════════════════════════════════════════
+
+local C = {
+    bg     = Color3.fromRGB(22, 24, 30),
+    panel  = Color3.fromRGB(32, 35, 44),
+    input  = Color3.fromRGB(44, 48, 60),
+    accent = Color3.fromRGB(88, 140, 240),
+    green  = Color3.fromRGB(90, 200, 130),
+    red    = Color3.fromRGB(220, 90, 90),
+    yellow = Color3.fromRGB(230, 190, 90),
+    text   = Color3.fromRGB(230, 232, 240),
+    muted  = Color3.fromRGB(140, 148, 165),
+    border = Color3.fromRGB(55, 60, 75),
+    log_bg = Color3.fromRGB(16, 18, 24),
+}
+local FONT      = Enum.Font.Gotham
+local FONT_MED  = Enum.Font.GothamMedium
+local FONT_BOLD = Enum.Font.GothamBold
+
+-- ═══════════════════════════════════════════════════════════════
+-- ROOT GUI
+-- ═══════════════════════════════════════════════════════════════
+
+if _G.GrowbloxFarmGUI then
+    pcall(function() _G.GrowbloxFarmGUI:Destroy() end)
+end
+
+local function pickParent()
+    if gethui then
+        local ok, h = pcall(gethui)
+        if ok and h then return h end
+    end
+    return Players.LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "GrowbloxFarmGUI"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 999
+gui.Parent = pickParent()
+_G.GrowbloxFarmGUI = gui
+
+local WIN_W, WIN_H = 440, 600
+local win = Instance.new("Frame")
+win.Size = UDim2.fromOffset(WIN_W, WIN_H)
+win.Position = UDim2.new(0, 40, 0, 60)
+win.BackgroundColor3 = C.bg
+win.BorderSizePixel = 0
+win.Active = true
+win.Parent = gui
+do
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 10); c.Parent = win
+    local s = Instance.new("UIStroke"); s.Color = C.border; s.Thickness = 1; s.Parent = win
+end
+
+-- Title bar
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 34)
+titleBar.BackgroundColor3 = C.panel
+titleBar.BorderSizePixel = 0
+titleBar.Parent = win
+do
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 10); c.Parent = titleBar
+    local fix = Instance.new("Frame")
+    fix.Size = UDim2.new(1, 0, 0, 12)
+    fix.Position = UDim2.new(0, 0, 1, -12)
+    fix.BackgroundColor3 = C.panel
+    fix.BorderSizePixel = 0
+    fix.Parent = titleBar
+end
+
+local title = Instance.new("TextLabel")
+title.BackgroundTransparency = 1
+title.Size = UDim2.new(1, -100, 1, 0)
+title.Position = UDim2.fromOffset(12, 0)
+title.Font = FONT_BOLD
+title.TextSize = 14
+title.TextColor3 = C.text
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Text = "Growblox Farm  ·  v1"
+title.Parent = titleBar
+
+local function makeTitleButton(text, xOffset, color)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.fromOffset(28, 24)
+    b.Position = UDim2.new(1, xOffset, 0, 5)
+    b.BackgroundColor3 = color
+    b.BorderSizePixel = 0
+    b.Font = FONT_BOLD
+    b.TextSize = 14
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Text = text
+    b.Parent = titleBar
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 6); c.Parent = b
+    return b
+end
+
+local minBtn   = makeTitleButton("—",  -68, C.input)
+local closeBtn = makeTitleButton("✕",  -34, C.red)
+
+-- Dragging
+do
+    local dragging, dragStart, startPos
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging  = true
+            dragStart = input.Position
+            startPos  = win.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+            local d = input.Position - dragStart
+            win.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + d.X,
+                startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+-- Content
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, -20, 1, -46)
+content.Position = UDim2.fromOffset(10, 40)
+content.BackgroundTransparency = 1
+content.Parent = win
+do
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 6)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = content
+end
+
+-- Config scroll
+local scroll = Instance.new("ScrollingFrame")
+scroll.Size = UDim2.new(1, 0, 1, -170)
+scroll.BackgroundColor3 = C.bg
+scroll.BackgroundTransparency = 1
+scroll.BorderSizePixel = 0
+scroll.ScrollBarThickness = 4
+scroll.ScrollBarImageColor3 = C.border
+scroll.ScrollBarImageTransparency = 0.3
+scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+scroll.LayoutOrder = 1
+scroll.Parent = content
+do
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 4)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = scroll
+end
+
+-- Status bar
+local statusBar = Instance.new("Frame")
+statusBar.Size = UDim2.new(1, 0, 0, 26)
+statusBar.BackgroundColor3 = C.panel
+statusBar.BorderSizePixel = 0
+statusBar.LayoutOrder = 2
+statusBar.Parent = content
+do
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 6); c.Parent = statusBar
+    local pad = Instance.new("UIPadding"); pad.PaddingLeft = UDim.new(0, 10); pad.PaddingRight = UDim.new(0, 10); pad.Parent = statusBar
+end
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, 0, 1, 0)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Font = FONT_MED
+statusLabel.TextSize = 12
+statusLabel.TextColor3 = C.muted
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.Text = "idle"
+statusLabel.Parent = statusBar
+
+-- Log panel
+local logPanel = Instance.new("Frame")
+logPanel.Size = UDim2.new(1, 0, 0, 132)
+logPanel.BackgroundColor3 = C.log_bg
+logPanel.BorderSizePixel = 0
+logPanel.LayoutOrder = 3
+logPanel.Parent = content
+do
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 6); c.Parent = logPanel
+    local s = Instance.new("UIStroke"); s.Color = C.border; s.Thickness = 1; s.Parent = logPanel
+end
+
+local logScroll = Instance.new("ScrollingFrame")
+logScroll.Size = UDim2.new(1, -16, 1, -12)
+logScroll.Position = UDim2.fromOffset(8, 6)
+logScroll.BackgroundTransparency = 1
+logScroll.BorderSizePixel = 0
+logScroll.ScrollBarThickness = 3
+logScroll.ScrollBarImageColor3 = C.border
+logScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+logScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+logScroll.Parent = logPanel
+do
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 2)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = logScroll
+end
+
+local logRows = {}
+local logRowCounter = 0
+
+local function appendLogRow(entry)
+    logRowCounter = logRowCounter + 1
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, 0, 0, 14)
+    lbl.BackgroundTransparency = 1
+    lbl.Font = FONT
+    lbl.TextSize = 11
+    lbl.TextColor3 = entry.color
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.TextTruncate = Enum.TextTruncate.AtEnd
+    lbl.Text = entry.text
+    lbl.LayoutOrder = -logRowCounter
+    lbl.Parent = logScroll
+    table.insert(logRows, lbl)
+    if #logRows > MAX_LOG then
+        local old = table.remove(logRows, 1)
+        if old then old:Destroy() end
+    end
+    task.defer(function()
+        logScroll.CanvasPosition = Vector2.new(0, math.huge)
+    end)
+end
+
+table.insert(LogListeners, appendLogRow)
+
+-- ═══════════════════════════════════════════════════════════════
+-- COMPONENT HELPERS
+-- ═══════════════════════════════════════════════════════════════
+
+local order = 0
+local function nextOrder()
+    order = order + 1
+    return order
+end
+
+local function makeSection(text)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, 0, 0, 20)
+    lbl.BackgroundTransparency = 1
+    lbl.Font = FONT_BOLD
+    lbl.TextSize = 11
+    lbl.TextColor3 = C.accent
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Text = text:upper()
+    lbl.LayoutOrder = nextOrder()
+    lbl.Parent = scroll
+    local pad = Instance.new("UIPadding")
+    pad.PaddingLeft = UDim.new(0, 4)
+    pad.Parent = lbl
+    return lbl
+end
+
+local function makeRow(labelText)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 28)
+    row.BackgroundColor3 = C.panel
+    row.BorderSizePixel = 0
+    row.LayoutOrder = nextOrder()
+    row.Parent = scroll
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 6); c.Parent = row
+    local pad = Instance.new("UIPadding")
+    pad.PaddingLeft  = UDim.new(0, 10)
+    pad.PaddingRight = UDim.new(0, 6)
+    pad.Parent = row
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(0, 130, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Font = FONT
+    lbl.TextSize = 12
+    lbl.TextColor3 = C.muted
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Text = labelText
+    lbl.Parent = row
+    return row
+end
+
+local function makeNumberInput(row, getValue, setValue, isInt)
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(0, 120, 1, -8)
+    box.Position = UDim2.new(1, -120, 0, 4)
+    box.BackgroundColor3 = C.input
+    box.BorderSizePixel = 0
+    box.Font = FONT_MED
+    box.TextSize = 12
+    box.TextColor3 = C.text
+    box.PlaceholderText = "number"
+    box.PlaceholderColor3 = C.muted
+    box.Text = tostring(getValue())
+    box.ClearTextOnFocus = false
+    box.Parent = row
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 4); c.Parent = box
+    local pad = Instance.new("UIPadding")
+    pad.PaddingLeft = UDim.new(0, 6)
+    pad.Parent = box
+
+    local function commit()
+        local n = tonumber(box.Text)
+        if not n then
+            box.Text = tostring(getValue())
+            return
+        end
+        if isInt then n = math.floor(n) end
+        setValue(n)
+    end
+
+    box.FocusLost:Connect(commit)
+    return box
+end
+
+local function makeNumberInputAllowNil(row, getValue, setValue)
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(0, 120, 1, -8)
+    box.Position = UDim2.new(1, -120, 0, 4)
+    box.BackgroundColor3 = C.input
+    box.BorderSizePixel = 0
+    box.Font = FONT_MED
+    box.TextSize = 12
+    box.TextColor3 = C.text
+    box.PlaceholderText = "nil"
+    box.PlaceholderColor3 = C.muted
+    local v = getValue()
+    box.Text = v and tostring(v) or ""
+    box.ClearTextOnFocus = false
+    box.Parent = row
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 4); c.Parent = box
+    local pad = Instance.new("UIPadding"); pad.PaddingLeft = UDim.new(0, 6); pad.Parent = box
+
+    box.FocusLost:Connect(function()
+        local s = box.Text
+        if s == "" then
+            setValue(nil)
+        else
+            local n = tonumber(s)
+            if n then setValue(math.floor(n)) else box.Text = "" end
+        end
+    end)
+    return box
+end
+
+local function makeTextInput(row, getValue, setValue)
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(0, 200, 1, -8)
+    box.Position = UDim2.new(1, -200, 0, 4)
+    box.BackgroundColor3 = C.input
+    box.BorderSizePixel = 0
+    box.Font = FONT_MED
+    box.TextSize = 12
+    box.TextColor3 = C.text
+    box.Text = tostring(getValue())
+    box.ClearTextOnFocus = false
+    box.Parent = row
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 4); c.Parent = box
+    local pad = Instance.new("UIPadding"); pad.PaddingLeft = UDim.new(0, 6); pad.Parent = box
+    box.FocusLost:Connect(function()
+        setValue(box.Text)
+    end)
+    return box
+end
+
+local function makeIDListInput(row, getArray, setArray)
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(0, 200, 1, -8)
+    box.Position = UDim2.new(1, -200, 0, 4)
+    box.BackgroundColor3 = C.input
+    box.BorderSizePixel = 0
+    box.Font = FONT_MED
+    box.TextSize = 12
+    box.TextColor3 = C.text
+    box.PlaceholderText = "1,2,3"
+    box.PlaceholderColor3 = C.muted
+    local function render()
+        local parts = {}
+        for id in pairs(getArray()) do parts[#parts + 1] = tostring(id) end
+        table.sort(parts, function(a, b) return tonumber(a) < tonumber(b) end)
+        box.Text = table.concat(parts, ",")
+    end
+    render()
+    box.ClearTextOnFocus = false
+    box.Parent = row
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 4); c.Parent = box
+    local pad = Instance.new("UIPadding"); pad.PaddingLeft = UDim.new(0, 6); pad.Parent = box
+    box.FocusLost:Connect(function()
+        local out = {}
+        for tok in string.gmatch(box.Text, "[^,%s]+") do
+            local n = tonumber(tok)
+            if n then out[math.floor(n)] = true end
+        end
+        setArray(out)
+        render()
+    end)
+    return box
+end
+
+local function makeDropdown(row, getValue, setValue, options)
+    local current = getValue()
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 140, 1, -8)
+    btn.Position = UDim2.new(1, -140, 0, 4)
+    btn.BackgroundColor3 = C.input
+    btn.BorderSizePixel = 0
+    btn.Font = FONT_MED
+    btn.TextSize = 12
+    btn.TextColor3 = C.text
+    btn.Text = tostring(current)
+    btn.TextXAlignment = Enum.TextXAlignment.Left
+    btn.Parent = row
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 4); c.Parent = btn
+    local pad = Instance.new("UIPadding"); pad.PaddingLeft = UDim.new(0, 6); pad.Parent = btn
+
+    local dropdown
+    btn.MouseButton1Click:Connect(function()
+        if dropdown then
+            dropdown:Destroy()
+            dropdown = nil
+            return
+        end
+        dropdown = Instance.new("Frame")
+        dropdown.Size = UDim2.fromOffset(140, #options * 26 + 4)
+        dropdown.Position = UDim2.new(1, -140, 0, 28)
+        dropdown.BackgroundColor3 = C.panel
+        dropdown.BorderSizePixel = 0
+        dropdown.ZIndex = 10
+        dropdown.Parent = row
+        local dc = Instance.new("UICorner"); dc.CornerRadius = UDim.new(0, 6); dc.Parent = dropdown
+        local ds = Instance.new("UIStroke"); ds.Color = C.border; ds.Thickness = 1; ds.Parent = dropdown
+        local list = Instance.new("UIListLayout")
+        list.Padding = UDim.new(0, 1); list.Parent = dropdown
+        local dpad = Instance.new("UIPadding"); dpad.PaddingTop = UDim.new(0, 2); dpad.Parent = dropdown
+
+        for _, opt in ipairs(options) do
+            local o = Instance.new("TextButton")
+            o.Size = UDim2.new(1, -4, 0, 24)
+            o.BackgroundColor3 = (opt == current) and C.accent or C.input
+            o.BorderSizePixel = 0
+            o.Font = FONT
+            o.TextSize = 12
+            o.TextColor3 = C.text
+            o.Text = tostring(opt)
+            o.ZIndex = 11
+            o.Parent = dropdown
+            local oc = Instance.new("UICorner"); oc.CornerRadius = UDim.new(0, 4); oc.Parent = o
+            o.MouseButton1Click:Connect(function()
+                current = opt
+                setValue(opt)
+                btn.Text = tostring(opt)
+                if dropdown then dropdown:Destroy(); dropdown = nil end
+            end)
+        end
+    end)
+
+    return btn
+end
+
+local function makeActionRow(labelText, buttonText, onClick, color)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 32)
+    row.BackgroundColor3 = C.panel
+    row.BorderSizePixel = 0
+    row.LayoutOrder = nextOrder()
+    row.Parent = scroll
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 6); c.Parent = row
+    local pad = Instance.new("UIPadding"); pad.PaddingLeft = UDim.new(0, 10); pad.PaddingRight = UDim.new(0, 10); pad.Parent = row
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(0, 200, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Font = FONT_MED
+    lbl.TextSize = 12
+    lbl.TextColor3 = C.text
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Text = labelText
+    lbl.Parent = row
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 120, 1, -8)
+    btn.Position = UDim2.new(1, -120, 0, 4)
+    btn.BackgroundColor3 = color or C.accent
+    btn.BorderSizePixel = 0
+    btn.Font = FONT_BOLD
+    btn.TextSize = 12
+    btn.TextColor3 = Color3.new(1, 1, 1)
+    btn.Text = buttonText
+    btn.Parent = row
+    local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(0, 4); bc.Parent = btn
+    btn.MouseButton1Click:Connect(onClick)
+    return { row = row, btn = btn, lbl = lbl }
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- BUILD CONFIG UI
+-- ═══════════════════════════════════════════════════════════════
+
+makeSection("Grid")
+
+local function buildNum(label, key, isInt)
+    local r = makeRow(label)
+    makeNumberInput(r, function() return Config[key] end, function(v) Config[key] = v end, isInt)
+end
+
+buildNum("layer",  "layer",  true)
+buildNum("min X",  "minX",   true)
+buildNum("max X",  "maxX",   true)
+buildNum("min Y",  "minY",   true)
+buildNum("max Y",  "maxY",   true)
+
+makeSection("Tile IDs")
+
+buildNum("air id",   "AIR_ID",   true)
+buildNum("place id", "PLACE_ID", true)
+
+local matRow = makeRow("mature ids")
+makeIDListInput(matRow,
+    function() return Config.MATURE_IDS end,
+    function(v) Config.MATURE_IDS = v end)
+
+makeSection("Actions")
+
+local actRow1 = makeRow("put action")
+makeDropdown(actRow1,
+    function() return Config.putAction end,
+    function(v) Config.putAction = v end,
+    { "tile", "splice", "act" })
+
+local actRow2 = makeRow("break action")
+makeDropdown(actRow2,
+    function() return Config.breakAction end,
+    function(v) Config.breakAction = v end,
+    { "tile", "harvest", "act" })
+
+local kindPutRow   = makeRow("kind put")
+makeNumberInputAllowNil(kindPutRow,
+    function() return Config.KIND_PUT end,
+    function(v) Config.KIND_PUT = v end)
+
+local kindBreakRow = makeRow("kind break")
+makeNumberInputAllowNil(kindBreakRow,
+    function() return Config.KIND_BREAK end,
+    function(v) Config.KIND_BREAK = v end)
+
+local seedRow = makeRow("splice seed")
+makeNumberInputAllowNil(seedRow,
+    function() return Config.SPLICE_SEED end,
+    function(v) Config.SPLICE_SEED = v end)
+
+local breakModeRow = makeRow("break mode")
+makeDropdown(breakModeRow,
+    function() return Config.breakMode end,
+    function(v) Config.breakMode = v end,
+    { "mature", "all" })
+
+makeSection("Pacing")
+
+buildNum("put cd",       "putCD",          false)
+buildNum("break cd",     "breakCD",        false)
+buildNum("scan interval","scanInterval",   false)
+buildNum("confirm wait", "confirmTimeout", false)
+
+-- ═══════════════════════════════════════════════════════════════
+-- CONTROL BUTTONS
+-- ═══════════════════════════════════════════════════════════════
+
+makeSection("Controls")
+
+local startBtnRef, stopBtnRef
+
+startBtnRef = makeActionRow("Farm loop", "START", function()
+    if Config.enabled then
+        log("already running", C.yellow)
+        return
+    end
+    Farm.start()
+    log("farm started", C.green)
+    if startBtnRef then startBtnRef.btn.Text = "RUNNING"; startBtnRef.btn.BackgroundColor3 = C.muted end
+    if stopBtnRef  then stopBtnRef.btn.Text  = "STOP"   ; stopBtnRef.btn.BackgroundColor3  = C.red    end
+end, C.green)
+
+stopBtnRef = makeActionRow("Halt loop", "STOP", function()
+    if not Config.enabled then
+        log("not running", C.yellow)
+        return
+    end
+    Farm.stop()
+    log("farm stopped", C.red)
+    if startBtnRef then startBtnRef.btn.Text = "START"; startBtnRef.btn.BackgroundColor3 = C.green end
+    if stopBtnRef  then stopBtnRef.btn.Text  = "STOP" ; stopBtnRef.btn.BackgroundColor3  = C.red   end
+end, C.red)
+
+makeActionRow("Learn tile IDs (60s)", "LEARN", function()
+    log("learner armed 60s — place+break blocks manually", C.yellow)
+    Farm.learn(60)
+end, C.yellow)
+
+makeActionRow("Calibrate grid", "CALIBRATE", function()
+    if Config.enabled then
+        log("stop farm before calibrating", C.yellow)
+        return
+    end
+    log("calibration started", C.yellow)
+    Farm.calibrate()
+end, C.accent)
+
+makeActionRow("Save config to disk", "SAVE", function()
+    saveConfig()
+end, C.accent)
+
+makeActionRow("Clear rejected cache", "RESET", function()
+    local n = 0
+    for k in pairs(World.rejected) do
+        World.rejected[k] = nil
+        n = n + 1
+    end
+    log(("cleared %d rejected tiles"):format(n), C.green)
+end, C.yellow)
+
+makeActionRow("Destroy GUI", "CLOSE", function()
+    saveConfig()
+    gui:Destroy()
+    _G.GrowbloxFarmGUI = nil
+end, C.muted)
+
+-- ═══════════════════════════════════════════════════════════════
+-- MINIMIZE
+-- ═══════════════════════════════════════════════════════════════
+
+local minimized = false
+local savedSize = win.Size
+minBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    if minimized then
+        savedSize = win.Size
+        win.Size = UDim2.fromOffset(WIN_W, 34)
+    else
+        win.Size = savedSize
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- CLOSE
+-- ═══════════════════════════════════════════════════════════════
+
+closeBtn.MouseButton1Click:Connect(function()
+    saveConfig()
+    gui:Destroy()
+    _G.GrowbloxFarmGUI = nil
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- LIVE STATUS
+-- ═══════════════════════════════════════════════════════════════
+
+task.spawn(function()
+    while gui.Parent do
+        task.wait(1)
+        local ok, st = pcall(Farm.status)
+        if ok and st then
+            local total = st.total or 1
+            local knownPct = math.floor((st.known / total) * 100 + 0.5)
+            local stateColor = Config.enabled and C.green or C.muted
+            statusLabel.Text = ("%s   world=%s   known %d/%d (%d%%)   empty=%d   mature=%d")
+                :format(
+                    Config.enabled and "RUNNING" or "IDLE",
+                    tostring(st.world == "" and "?" or st.world),
+                    st.known, total, knownPct,
+                    st.empty, st.mature)
+            statusLabel.TextColor3 = stateColor
+            if startBtnRef then
+                startBtnRef.btn.Text = Config.enabled and "RUNNING" or "START"
+                startBtnRef.btn.BackgroundColor3 = Config.enabled and C.muted or C.green
+            end
+        end
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- SEED LOG
+-- ═══════════════════════════════════════════════════════════════
+
+log("GUI ready", C.green)
+log("step 1 — LEARN, place+break blocks in-game, watch IDs appear")
+log("step 2 — fill tile id fields + mature ids")
+log("step 3 — CALIBRATE, wait ~15s")
+log("step 4 — START")
+
+if Config.autoStart and not Config.enabled then
+    task.delay(2, function()
+        Farm.start()
+        log("autoStart engaged", C.green)
+    end)
+end
+
+return { gui = gui, log = log }
