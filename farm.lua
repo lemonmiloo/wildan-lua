@@ -1,4 +1,3 @@
---!nonstrict
 -- Growblox auto farm — put + break block, tile layer.
 -- Load BEFORE the GUI script.
 
